@@ -1,0 +1,137 @@
+package com.account.service;
+
+import com.common.utils.CodecUtils;
+import com.common.utils.NumberUtils;
+import com.user.mapper.AccountMapper;
+import com.user.pojo.Account;
+import org.apache.commons.lang.StringUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.amqp.core.AmqpTemplate;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.stereotype.Service;
+
+import java.util.Date;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.concurrent.TimeUnit;
+
+
+@Service
+public class AccountService {
+
+    @Autowired
+    private AccountMapper accountMapper;
+
+    @Autowired
+    private StringRedisTemplate redisTemplate;
+
+    @Autowired
+    private AmqpTemplate amqpTemplate;
+
+    static final String KEY_PREFIX = "user:code:phone:";
+
+    static final Logger LOGGER = LoggerFactory.getLogger(AccountService.class);
+
+
+    public Boolean sendVerifyCode(String phone) {
+
+        //生成验证码
+        String code  = NumberUtils.generateCode(6);
+
+        try {
+            //发送短信
+            Map<String,String> msg = new HashMap<>();
+
+            msg.put("phone",phone);
+            msg.put("code",code);
+            this.amqpTemplate.convertAndSend("sms.exchange","sms.verify.code",msg);
+            //将code存入redis
+            this.redisTemplate.opsForValue().set(KEY_PREFIX+phone,code,5, TimeUnit.MINUTES);
+            return true;
+        }catch (Exception e){
+            LOGGER.error("发送短信失败。phone{},code:{}",phone,code);
+            return false;
+        }
+
+
+
+    }
+
+
+    public Boolean checkData(String data, Integer type) {
+
+        User record = new User();
+        switch(type){
+            case 1:
+                record.setUsername(data);
+                break;
+            case 2:
+                record.setPhone(data);
+                break;
+            default:
+                return null;
+        }
+        return this.userMapper.selectCount(record)==0;
+    }
+
+
+    public Boolean register(User user, String code) {
+
+        //校验短信验证码
+        String cacheCode = this.redisTemplate.opsForValue().get(KEY_PREFIX+user.getPhone());
+
+        LOGGER.info("您输入的验证码为:"+code+",您应该输入的验证码为"+cacheCode);
+
+        //暂时不校验
+        if(!StringUtils.equals(code,cacheCode)){
+            return false;
+        }
+
+        //生成盐
+        String salt = CodecUtils.generateSalt();
+        user.setSalt(salt);
+
+        //对密码加密
+        user.setPassword(CodecUtils.md5Hex(user.getPassword(),salt));
+
+        //强制设置不能指定的参数为null
+        user.setId(null);
+        user.setCreated(new Date());
+
+        //添加到数据库
+        boolean b = this.userMapper.insertSelective(user)==1;
+
+        if(b){
+            //注册成功,删除redis中的记录
+            this.redisTemplate.delete(KEY_PREFIX+user.getPhone());
+        }
+
+        return b;
+
+    }
+
+    public Account queryUser(String username, String id) {
+
+        //查询
+        Account record = new Account();
+        record.setUsername(username);
+        Account account = this.userMapper.selectOne(record);
+
+        //校验用户名
+        if(account==null){
+            return null;
+        }
+
+        //校验密码
+        if(!account.getId().equals(CodecUtils.md5Hex(id))){
+            return null;
+        }
+
+        return account;
+
+    }
+
+
+}
